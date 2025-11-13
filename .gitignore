@@ -1,2 +1,5 @@
 # Ignore the data folder and its contents
 data/
+!data/ensembl/protein_coding_genes.csv
+!data/ensembl/filtered/*
+!data/archs4/splits/*
