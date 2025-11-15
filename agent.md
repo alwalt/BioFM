@@ -15,7 +15,7 @@ This agent develops a **BulkFormer-inspired foundation model for bulk RNA-seq**,
 
 3. **Stage 3 — Graph-aware Transformer Encoder**
    Learns gene–gene contextual relationships via:
-   • GCN over a **PCC-derived gene co-expression graph**
+   • GAT over a **PCC-derived gene co-expression graph**
    • Performer layers for scalable self-attention
 
 The end goal is a **general-purpose bulk transcriptome foundation model** suitable for many downstream tasks.
