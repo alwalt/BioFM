@@ -1,167 +1,250 @@
 # 🧬 Agent Overview: Bulk RNA-seq Foundation Model (PreBULK / BulkFormer-style)
 
 ## Objective
-This agent develops and experiments with a **transformer-based foundation model for bulk RNA-seq data**.  
-Inspired by **BulkFormer**, it treats transcriptomic profiles as token sequences — each gene as a "token" with learned embeddings —  
-to learn generalizable gene–gene dependencies and biological context across diverse conditions and tissues.
+
+This agent develops a **BulkFormer-inspired foundation model for bulk RNA-seq**, executed in sequential stages:
+
+1. **Stage 1 — Deep Autoencoder (AE)**
+   Learns a compact **global sample embedding** using reconstruction.
+
+2. **Stage 2 — Feature-Augmented Gene Tokens**
+   Incorporates:
+   • **ESM2 protein embeddings** (gene identity)
+   • **Rotary Expression Embeddings (REE)** (gene expression magnitude)
+   • **AE latent vector** (sample-level context)
+
+3. **Stage 3 — Graph-aware Transformer Encoder**
+   Learns gene–gene contextual relationships via:
+   • GCN over a **PCC-derived gene co-expression graph**
+   • Performer layers for scalable self-attention
+
+The end goal is a **general-purpose bulk transcriptome foundation model** suitable for many downstream tasks.
 
 ---
 
-## 🧠 High-Level Goals
-1. **Assemble a large, diverse bulk RNA-seq corpus** (e.g., from ARCHS4, TCGA).
-2. **Standardize all data** (TPM normalization, log transform, z-score) into a consistent gene-by-sample matrix.
-3. **Embed genes and samples** into high-dimensional continuous spaces:
-   - **Gene identity embeddings** via **ESM2** (mean-pooled amino acid embeddings).
-   - **Expression embeddings** via **Rotary Expression Embedding (REE)** — a variant of ROPE adapted to encode magnitude and continuity.
-   - **Sample context embeddings** via an MLP summarizing overall transcriptomic state.
-4. **Pretrain a transformer encoder** on masked-token or reconstruction objectives to learn biological representations.
-5. **Fine-tune or probe** for downstream tasks:
-   - Disease classification (e.g., TCGA cancer types)
-   - Tissue or perturbation prediction
-   - Embedding visualization (UMAP / t-SNE)
+# 📍 Where We Are Now (New Status Section)
+
+### ✔ Stage 1 is fully functional
+
+You built a **deep autoencoder** with DDP, multi-GPU support, and stable training.
+Latent dimension = **320**, matching the target transformer embedding size.
+
+### ✔ Latent space validation is complete
+
+t-SNE confirms that the AE latent preserves biological structure and separates cancer types more cleanly than raw log(TPM).
+This validates Stage 1 as a solid sample-context encoder.
+
+### ✔ You now understand BulkFormer’s token construction correctly
+
+The model NEVER materializes
+`(samples × genes × 320)`
+in memory.
+REE, ESM2, and AE embeddings are generated **per mini-batch**, inside the GPU forward pass.
+
+Your earlier crash came from attempting to generate **2 TB** of REE arrays at once.
+This will not be repeated — REE will be implemented in-model.
+
+### ✔ You have clarified the biological graph used by the GCN
+
+The correct graph is:
+
+**PCC-based gene co-expression graph**
+• built from training data
+• top 20 neighbors per gene
+• PCC < 0.4 removed
+• adjacency is fixed
+• GCN weights are *learned* during MLM pretraining
+
+### ✔ You are now preparing to move to Stage 2
+
+Next steps (immediately ahead):
+
+1. Generate and store **ESM2 embeddings** for each gene (one per gene).
+2. Implement **REE** as a GPU module (not precomputed arrays).
+3. Combine:
+
+   ```
+   gene_token = ESM2 + REE(x_g) + AE_latent
+   ```
+4. Plug tokens into the upcoming **GCN + Performer encoder**.
+
+Everything from here is about building **gene-token embeddings** and preparing the graph transformer.
+
+You are right on schedule.
 
 ---
 
-## 📦 Datasets
+# 🚀 Stage 1: Deep Autoencoder (Updated)
 
-| Source | Description | Format |
-|---------|--------------|--------|
-| **ARCHS4** | ~128k human RNA-seq samples (raw counts) | `.h5` |
-| **TCGA** | Cancer transcriptomes (33 types) | `.tsv` / `.h5` |
-| (Optional) GEO subsets | For validation / cross-domain testing | — |
+You implemented the AE with:
 
----
-
-## ⚙️ Preprocessing Pipeline (`PreBULK`)
-The goal is to ensure consistency, comparability, and inclusion of all protein-coding genes.
-
-### Steps
-1. **Extract protein-coding gene list**
-   - From `Homo_sapiens.GRCh38.pep.all.fa`
-   - Keep only `gene_biotype:protein_coding`
-2. **Load & normalize expression**
-   - Retrieve counts via `archs4py`
-   - Filter low-quality samples (`min_nonzero_genes ≥ 14,000`)
-   - TPM normalization  
-     \[
-     \text{TPM}_{g,s} = \frac{\text{Counts}_{g,s} / \text{Length}_g}{\sum_g (\text{Counts}_{g,s} / \text{Length}_g)} \times 10^6
-     \]
-   - Log-transform: `log(TPM + 1)`
-   - Z-score standardization per gene
-3. **Ensure full alignment**
-   - Reindex to include *all* protein-coding genes (zero-pad missing)
-4. **Export or batch-stream**
-   - Split into `train`, `val`, and `test` sets (stratified by cancer type)
-
----
-
-## 🔍 Representation Learning
-
-### 1. Gene Identity (ESM2)
-- Extract amino acid sequences for each gene.
-- Embed via **ESM2**.
-- Aggregate via **mean pooling**.
-- Produces an `E_ESM2` matrix of shape `[N_genes, d_model]`.
-
-### 2. Rotary Expression Embedding (REE)
-Adapt **rotary position encoding (ROPE)** to continuous gene expression values:
-\[
-REE(x_g) = [\cos(x_g / f_i), \sin(x_g / f_i)]_{i=1}^{d/2}
-\]
-where \( f_i = 10^{(i / d) \cdot \text{scaling factor}} \).  
-Encodes magnitude & continuity of expression without rank loss.
-
-### 3. Sample Context Embedding (MLP)
-- A small MLP compresses the entire transcriptomic vector into a global embedding `E_MLP`.
-- Adds sample-level biological context (e.g., global activation states).
-
-### 4. Combined Representation
-Final token representation for gene *g* in sample *s*:
-\[
-E_{g,s} = E_{ESM2,g} + E_{REE,g,s} + E_{MLP,s}
-\]
-
----
-
-## 🧩 Model Architecture
-- **Encoder-only transformer** (BERT-like)
-- Input: gene-token embeddings per sample
-- Objective: masked gene reconstruction / contrastive pretraining
-- Output: learned gene and sample embeddings
-
----
-
-## 📊 Visualization & Quality Control
-To validate preprocessing and embeddings:
-- **t-SNE / UMAP** projections (test set)
-- Stratified color coding by `tcga_label`
-- Compare separability of cancer classes and tissues
-- Track runtime efficiency across subsets (e.g., 5 min for 12k test samples)
-
----
-
-## 🧪 Next Steps
-- ✅ Confirm pipeline on test set (ARCHS4)
-- 🔜 Integrate TCGA for cancer-type classification benchmark
-- 🔜 Implement REE transformation layer
-- 🔜 Generate ESM2 gene embeddings and align by Ensembl ID
-- 🔜 Pretrain transformer on masked-token objective
-- 🔜 Evaluate on disease classification (weighted F1) and clustering quality
-
----
-
-## 🧰 Environment
-Recommended setup (conda, WSL2 or Linux):
-```bash
-conda create -n biofm python=3.10
-conda activate biofm
-conda install -c conda-forge numpy pandas matplotlib seaborn scikit-learn biopython
-pip install archs4py umap-learn torch esm
-````
-
-Optional GPU acceleration (RAPIDS):
-
-```bash
-conda install -c rapidsai -c nvidia -c conda-forge cuml cudf python=3.10 cuda-version=12.2
-```
-
----
-
-## 📁 Folder Structure
+### **Encoder**
 
 ```
-project_root/
-│
-├── data/
-│   ├── archs4/
-│   │   ├── human_gene_v2.5.h5
-│   │   └── splits/
-│   ├── ensembl/
-│   │   └── Homo_sapiens.GRCh38.pep.all.fa
-│   └── tcga/
-│
-├── scripts/
-│   ├── prebulk_preprocessing.py
-│   ├── visualize_umap_tsne.py
-│   └── train_transformer.py
-│
-├── models/
-│   └── bulkformer_transformer.py
-│
-└── agent.md   ← (this file)
+n_genes → 4096 → 1024 → 320
 ```
+
+### **Decoder**
+
+```
+320 → 1024 → 4096 → n_genes
+```
+
+### Training implementation
+
+* DistributedDataParallel (DDP)
+* `torchrun --nproc_per_node=2`
+* `local_rank`, `rank`, `world_size`
+* Grad averaging across GPUs
+* Deterministic sampling via DistributedSampler
+
+### Why it matters
+
+This latent vector:
+
+* captures **global transcriptomic state**
+* replaces BulkFormer’s MLP sample embedding
+* becomes part of the **final gene token**
 
 ---
 
-## 🧩 References
+# 🧪 Validation & Latent Space Visualization (Updated)
 
-* **BulkFormer: A Foundation Model for Transcriptomic Data**
-  [bioRxiv, 2024]
-* **ESM2 Protein Language Model (Meta AI, 2022)**
+You built a script to:
+
+1. Load model weights
+2. Extract latent vectors from the **validation** set
+3. Run TSNE on raw expression and latent
+4. Color by `tcga_label`
+
+Result:
+**AE latent shows stronger separation than raw counts**, meaning the autoencoder is compressing meaningful structure.
+
+You will repeat on the **test** set once all architecture stages are in place.
 
 ---
 
-*Last updated: November 2025*
+# 🧠 High-Level Goals (Updated)
+
+1. **Prepare large-scale normalized RNA-seq data**
+2. **Learn global state via AE**
+3. **Add gene-token features (ESM2, REE)**
+4. **Add biological graph priors (PCC graph)**
+5. **Train transformer encoder (GCN + Performer)**
+6. **Evaluate on downstream biological tasks**
+
+---
+
+# 📦 Datasets (Updated)
+
+Same as before, with the note:
+
+*ARCHS4 is needed to compute the PCC graph.*
+
+---
+
+# ⚙️ Preprocessing Pipeline (Updated)
+
+1. Extract protein-coding genes.
+2. Normalize counts → TPM → log(TPM+1).
+3. Reindex to consistent gene list.
+4. Split train/val/test.
+5. Build **gene–gene PCC graph** from *train only*.
+
+---
+
+# 🧩 Representation Learning Architecture (Updated)
+
+## ✔ Stage 1: AE Sample Embedding
+
+You are done here.
+
+## ✔ Stage 2: Gene Identity Embedding (ESM2)
+
+* One vector per gene
+* Same ordering as expression matrix
+* Project to model dimension (320)
+
+## ✔ Stage 3: Rotary Expression Embedding (REE)
+
+* Implemented in Batch mode *inside the model*
+* No precomputation
+* Uses:
+  [
+  \sin(x_g / \theta_i), ; \cos(x_g / \theta_i)
+  ]
+
+## ✔ Combined Token
 
 ```
+Token(g, s) =
+    proj(ESM2[g])
+  + REE(expression_s[g])
+  + proj(AE_latent[s])
+```
+
+Matches BulkFormer architecture.
+
+---
+
+# 🌉 Stage 3: GCN + Performer Encoder (New Clarified Details)
+
+### Graph Convolution Network (GCN)
+
+Uses **PCC-based co-expression graph**.
+
+Purpose:
+
+* Inject explicit biological prior (hard graph)
+* Update gene-token via neighborhood aggregation
+
+### Performer Layers
+
+Purpose:
+
+* Model global gene dependencies
+* Capture implicit interactions not in the PCC graph
+* Scalability: O(n) attention
+
+### Combined effect:
+
+GCN = inductive bias
+Performer = full global reasoning
+
+---
+
+# 🧪 Next Steps (Updated)
+
+### Immediate
+
+✔ Implement REE as a PyTorch module
+✔ Build small ESM2 embedding index
+✔ Write PCC graph builder
+✔ Write GCN + Performer block interface
+
+### Medium
+
+Implement masked-gene pretraining:
+
+* 15% genes masked
+* Predict masked expression values
+
+### Long
+
+Benchmark on:
+
+* TCGA cancer type classification
+* Tissue classification
+* Drug perturbation prediction
+* Gene essentiality prediction
+
+---
+
+# 🧰 Environment (Updated)
+
+* PyTorch 2.x
+* torchrun + DDP
+* CUDA 12.x
+* Multi-GPU pipeline confirmed
+
 ---

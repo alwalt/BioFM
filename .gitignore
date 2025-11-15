@@ -3,3 +3,5 @@ data/
 !data/ensembl/protein_coding_genes.csv
 !data/ensembl/filtered/*
 !data/archs4/splits/*
+media/
+graph/
