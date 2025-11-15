@@ -5,3 +5,4 @@ data/
 !data/archs4/splits/*
 media/
 graph/
+autoencoder_weights.py
