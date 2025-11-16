@@ -66,6 +66,7 @@ def main():
     print("\n[DATA] Loading expression data...")
     t_start = time.time()
     X_df = pd.read_parquet("./data/archs4/processed_short_proteins/test_expr_logtpm_short.parquet")
+    X_df = X_df.T
     X_np = X_df.values   # shape [N, G]
     num_samples, num_genes = X_np.shape
     t_load = time.time() - t_start
@@ -76,8 +77,8 @@ def main():
     # -----------------------------------------------------------
     print("\n[DATA] Loading ESM2 gene embeddings...")
     t_start = time.time()
-    esm2_raw = torch.load("./data/embeddings/esm2_t6_8M_UR50D_gene_embeddings.pt")
-    esm2_raw = esm2_raw.float().to(device)
+    esm2_data = torch.load("./data/embeddings/esm2_t6_8M_UR50D_gene_embeddings.pt")
+    esm2_raw = esm2_data['embeddings'].float().to(device)
     t_load = time.time() - t_start
     print(f"  ✓ Shape: {esm2_raw.shape}, Time: {t_load:.2f}s")
 

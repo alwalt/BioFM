@@ -5,11 +5,11 @@ from performer_pytorch import Performer
 
 model_params = {
     'dim': 320, # embedding dimension (640 original BF model)
-    "bins": 0,
+    "bins": 10,
     "gb_repeat": 1, # 3 original BF model
-    "p_repeat": 4,
-    'bin_head': 12,
-    'full_head': 8,
+    "p_repeat": 2, # 4 original BF model
+    'bin_head': 8,
+    'full_head': 4,
     'gene_length': 19357 # 20010 genes in original data
 }
 
@@ -23,7 +23,7 @@ model_params = {
 #   - run dynamic computations per sample (masking + sin/cos transform).
 # Not a learned embedding — purely a deterministic transformation.
 class PositionalExprEmbedding(nn.Module):
-      def __init__(self, dim):
+    def __init__(self, dim):
         super().__init__()
         self.mask_token_id = -10
         # Even numbers because rotary embeddings use pairs of sin and cos
@@ -33,28 +33,28 @@ class PositionalExprEmbedding(nn.Module):
         # requires_grad=False means we don't want to update this during training
         self.inv_freq = nn.Parameter(1. / (100 ** (torch.arange(0, dim, 2).float() /dim)), requires_grad=False)
 
-        # forward is required for nn.Module
-        # it's the function your model will use when called
-        # it's what happns to x when the model is called
-        def forward(self, x):
-            # First it creates a boolean mask and outputs the indices where the mask is true
-            # Then it gives the coordinates of the masked values 
-            # .nonzero() returns the indices of non-zero elements in the tensor
-            x_mask_idx = (x == self.mask_token_id).nonzero()
+    # forward is required for nn.Module
+    # it's the function your model will use when called
+    # it's what happns to x when the model is called
+    def forward(self, x):
+        # First it creates a boolean mask and outputs the indices where the mask is true
+        # Then it gives the coordinates of the masked values 
+        # .nonzero() returns the indices of non-zero elements in the tensor
+        x_mask_idx = (x == self.mask_token_id).nonzero()
 
-            # Multiply each element of x by every frequency in inv_freq.
-            # Einsum expands x from shape (b, i) to (b, i, j) by pairing each feature
-            # with all frequency values, producing a frequency-modulated version of x.
-            x - torch.einsum("bi,j->bij", x, self.inv_freq)
-            # Take the sin and cos of every element in x
-            # concatenates along the last dimension
-            x = torch.cat((x.sin(), x.cos()), dim=-1)
-            
-            # This sets masked positions to zero
-            x[x_mask_idx[:,0], x_mask_idx[:,1]] = 0
+        # Multiply each element of x by every frequency in inv_freq.
+        # Einsum expands x from shape (b, i) to (b, i, j) by pairing each feature
+        # with all frequency values, producing a frequency-modulated version of x.
+        x = torch.einsum("bi,j->bij", x, self.inv_freq)
+        # Take the sin and cos of every element in x
+        # concatenates along the last dimension
+        x = torch.cat((x.sin(), x.cos()), dim=-1)
+        
+        # This sets masked positions to zero
+        x[x_mask_idx[:,0], x_mask_idx[:,1]] = 0
 
-            # The final output will have zeros where the mask was true
-            return x
+        # The final output will have zeros where the mask was true
+        return x
       
 # The encoder block
 # GB stand for Graph and Bins
@@ -89,7 +89,7 @@ class GBFormer(nn.Module):
         #   - prevents high-degree nodes from dominating
         #   - ensures messages are scaled fairly
         #   - keeps propagation symmetric for undirected graphs
-        self.g = GCNConv(dim, dim, cached=True, add_self_looops=False)
+        self.g = GCNConv(dim, dim, cached=True, add_self_loops=False)
         # self.g = GATv2Conv(dim, dim, add_self_loops=False)
 
         # Learns a scalar "bin score" for each gene embedding.
@@ -117,8 +117,8 @@ class GBFormer(nn.Module):
             # heads = number of attention heads
             # dim_head = dimension of each head
             Performer(dim=self.dim, heads=self.bin_head, 
-                      depth=1, dim_head=self.dim//self.full_head, attn_dropout=0.2, ff_dropout=0.2)
-                      for _ in range(self.p_repeat)
+                      depth=1, dim_head=self.dim//self.bin_head, attn_dropout=0.2, ff_dropout=0.2)
+                      for _ in range(self.bins)
             ])
         
         # Global Performer block
@@ -126,6 +126,7 @@ class GBFormer(nn.Module):
         self.f = nn.Sequential(*[
             Performer(dim=self.dim, heads=self.full_head, 
                       depth=1, dim_head=self.dim//self.full_head)
+            for _ in range(self.p_repeat)
         ])
 
         # Normalizes each gene's embedding vector to have mean 0 and variance 1
@@ -133,6 +134,7 @@ class GBFormer(nn.Module):
         self.layernorm = nn.LayerNorm(self.dim)
 
     def forward(self, x, graph):
+        # print("GBFormer b-len:", len(self.b))
         b, g, e = x.shape
 
         # Normalize gene embeddings
@@ -173,6 +175,8 @@ class GBFormer(nn.Module):
 
         x = self.f(x) # Global attention across all genes
 
+        return x
+
 
 # nn.Module is the base class for all neural network modules in PyTorch.
 class BulkFormer(nn.Module):
@@ -205,7 +209,7 @@ class BulkFormer(nn.Module):
         self.full_head = full_head
 
         self.gb_repeat = gb_repeat
-        self.p_repeat = 1
+        self.p_repeat = p_repeat
 
         self.graph = graph
 
@@ -300,7 +304,7 @@ class BulkFormer(nn.Module):
             # for probing, interpretability, or downstream tasks.
             if repr_layers and idx in repr_layers:
                 hidden[idx] = x
-
+        
         x = self.layernorm(x)
         if repr_layers and idx in repr_layers:
             hidden[idx] = x
