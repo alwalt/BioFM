@@ -6,7 +6,7 @@ from performer_pytorch import Performer
 model_params = {
     'dim': 320, # embedding dimension (640 original BF model)
     "bins": 0,
-    "gb_repeat": 3,
+    "gb_repeat": 1, # 3 original BF model
     "p_repeat": 4,
     'bin_head': 12,
     'full_head': 8,
@@ -200,7 +200,7 @@ class BulkFormer(nn.Module):
         # # model size, and desired performance. A common approach is to divide the model's 
         # embedding dimension by the number of heads to get the dimension for each head. 
         # Some popular architectures like the BERT-base model use 12 heads.
-        self.bins = bin 
+        self.bins = bins 
         self.bin_head = bin_head
         self.full_head = full_head
 
@@ -224,7 +224,7 @@ class BulkFormer(nn.Module):
             nn.Linear(self.gene_emb.shape[1], 4 * self.dim),
             # Relu is zero for negative inputs and linear for positive inputs
             # Used to introduce non-linearity
-            nn.ReLu(),
+            nn.ReLU(),
             nn.Linear(4 * self.dim, self.dim)
         )
 
@@ -265,10 +265,22 @@ class BulkFormer(nn.Module):
         self.ae_enc = nn.Sequential( 
             # Compresses the gene expression vector into a lower-dimensional latent space
             nn.Linear(self.gene_length, 4 * self.dim), 
-            nn.Relu(), 
+            nn.ReLU(), 
             # Projects the compressed representation into the final latent space of size dim
             nn.Linear(4 * self.dim, self.dim),
-            nn.Relu(),
+            nn.ReLU(),
+        )
+
+        # Final prediction head.
+        # Takes each gene’s contextual embedding (dim)
+        # → expands to 4*dim → non-linearity → collapses to 1 scalar.
+        # Output shape: [B, G, 1] = predicted gene expression values.
+        # Final ReLU enforces non-negative predictions.
+        self.head = nn.Sequential(
+            nn.Linear(self.dim, 4 * self.dim),
+            nn.ReLU(),
+            nn.Linear(4 * self.dim, 1),
+            nn.ReLU(),
         )
 
     def forward(self, x, repr_layers=None):
