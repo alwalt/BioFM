@@ -8,3 +8,5 @@ graph/
 autoencoder_weights.pt
 bulkformer_gbformer.pt
 scratch/
+bulkformer_checkpoints/
+checkpoints/

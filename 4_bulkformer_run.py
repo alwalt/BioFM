@@ -155,7 +155,7 @@ def main():
         shuffle=True,
         seed=42
     )
-    loader = DataLoader(dataset, batch_size=64, sampler=sampler)
+    loader = DataLoader(dataset, batch_size=4, sampler=sampler)
     t_prep = time.time() - t_start
     if is_main:
         print(f"  ✓ Dataset size: {len(dataset)}, Batches: {len(loader)}, Batch size: {loader.batch_size}, Time: {t_prep:.2f}s")
