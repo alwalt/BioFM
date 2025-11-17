@@ -156,9 +156,20 @@ def main():
         seed=42
     )
     loader = DataLoader(dataset, batch_size=4, sampler=sampler)
+    
+    # Load validation data
+    X_val_df = pd.read_parquet("./data/archs4/processed_short_proteins/val_expr_logtpm_short.parquet")
+    X_val_df = X_val_df.T
+    X_val_np = X_val_df.values
+    val_dataset = BulkMLMDataset(X_val_np)
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=4, sampler=val_sampler)
+    
     t_prep = time.time() - t_start
     if is_main:
-        print(f"  ✓ Dataset size: {len(dataset)}, Batches: {len(loader)}, Batch size: {loader.batch_size}, Time: {t_prep:.2f}s")
+        print(f"  ✓ Train: {len(dataset)} samples, {len(loader)} batches")
+        print(f"  ✓ Val: {len(val_dataset)} samples, {len(val_loader)} batches")
+        print(f"  ✓ Batch size: {loader.batch_size}, Time: {t_prep:.2f}s")
 
     # -----------------------------------------------------------
     # Optimizer & loss
@@ -232,9 +243,32 @@ def main():
         epoch_time = time.time() - epoch_start
         epoch_avg_loss = running_loss / num_batches
         
+        # Validation
+        model.eval()
+        val_loss = 0.0
+        val_batches = 0
+        with torch.no_grad():
+            for x_masked, x_true, mask_idx in val_loader:
+                x_masked = x_masked.to(device)
+                x_true = x_true.to(device)
+                pred = model(x_masked)
+                
+                loss_list = []
+                for i in range(len(mask_idx)):
+                    idxs = mask_idx[i]
+                    loss_list.append(mse_loss(pred[i, idxs], x_true[i, idxs]))
+                
+                val_loss += torch.stack(loss_list).mean().item()
+                val_batches += 1
+        
+        val_avg_loss = val_loss / val_batches
+        
         if is_main:
             print(f"\n  ╔════════════════════════════════════════════╗")
-            print(f"  ║ Epoch {epoch+1}/{epochs} | Avg Loss: {epoch_avg_loss:.6f} | Time: {epoch_time:.2f}s")
+            print(f"  ║ Epoch {epoch+1}/{epochs}")
+            print(f"  ║ Train Loss: {epoch_avg_loss:.6f}")
+            print(f"  ║ Val Loss:   {val_avg_loss:.6f}")
+            print(f"  ║ Time: {epoch_time:.2f}s")
             print(f"  ╚════════════════════════════════════════════╝\n")
 
     # -----------------------------------------------------------
