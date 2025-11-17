@@ -187,6 +187,17 @@ def main():
 
         for batch_idx, (x_masked, x_true, mask_idx) in enumerate(loader):
             batch_start = time.time()
+
+             # Heartbeat every 30 seconds (rank 0 only)
+            if is_main:
+                now = time.time()
+                if not hasattr(main, "_last_beat") or now - main._last_beat > 30:
+                    main._last_beat = now
+                    pct = 100.0 * batch_idx / len(loader)
+                    elapsed = now - script_start
+                    print(f"[HEARTBEAT] Epoch {epoch+1}/{epochs} | "
+                        f"Batch {batch_idx}/{len(loader)} ({pct:.2f}%) | "
+                        f"Elapsed: {elapsed/60:.1f} min")
             
             x_masked = x_masked.to(device)
             x_true = x_true.to(device)
