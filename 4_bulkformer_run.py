@@ -18,6 +18,14 @@ except ImportError:
     HAS_SAFETENSORS = False
     print("⚠ safetensors not installed. Install with: pip install safetensors")
 
+try:
+    import matplotlib.pyplot as plt
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+
+# TensorBoard removed due to NumPy 2.x incompatibilities
+
 from model.bulkformer import BulkFormer, model_params  
 
 
@@ -187,7 +195,18 @@ def main():
     if is_main:
         print("\n[TRAIN] Starting training loop...")
         print("="*70 + "\n")
-    epochs = 5
+    epochs = 20
+    patience = 3
+    best_val_loss = float('inf')
+    patience_counter = 0
+    ckpt_dir = Path("bulkformer_checkpoints")
+    ckpt_dir.mkdir(exist_ok=True)
+    
+    writer = None  # TensorBoard removed
+    
+    # Loss tracking for plotting
+    train_losses = []
+    val_losses = []
 
     for epoch in range(epochs):
         epoch_start = time.time()
@@ -199,10 +218,10 @@ def main():
         for batch_idx, (x_masked, x_true, mask_idx) in enumerate(loader):
             batch_start = time.time()
 
-             # Heartbeat every 30 seconds (rank 0 only)
+             # Heartbeat every 60 seconds (rank 0 only)
             if is_main:
                 now = time.time()
-                if not hasattr(main, "_last_beat") or now - main._last_beat > 30:
+                if not hasattr(main, "_last_beat") or now - main._last_beat > 60:
                     main._last_beat = now
                     pct = 100.0 * batch_idx / len(loader)
                     elapsed = now - script_start
@@ -261,7 +280,19 @@ def main():
                 val_loss += torch.stack(loss_list).mean().item()
                 val_batches += 1
         
-        val_avg_loss = val_loss / val_batches
+        # Synchronize validation metrics across all ranks (DDP)
+        val_loss_tensor = torch.tensor(val_loss, device=device)
+        val_batches_tensor = torch.tensor(val_batches, device=device)
+        dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_batches_tensor, op=dist.ReduceOp.SUM)
+        val_avg_loss = (val_loss_tensor / val_batches_tensor).item()
+        
+        # Track losses
+        train_losses.append(epoch_avg_loss)
+        val_losses.append(val_avg_loss)
+        
+        # Early stopping + checkpoint saving
+        model_to_save = model.module if isinstance(model, DDP) else model
         
         if is_main:
             print(f"\n  ╔════════════════════════════════════════════╗")
@@ -269,36 +300,40 @@ def main():
             print(f"  ║ Train Loss: {epoch_avg_loss:.6f}")
             print(f"  ║ Val Loss:   {val_avg_loss:.6f}")
             print(f"  ║ Time: {epoch_time:.2f}s")
+            
+            # Save checkpoint for this epoch
+            pt_path = ckpt_dir / f"epoch_{epoch}.pt"
+            torch.save(model_to_save.state_dict(), pt_path)
+            
+            # Check for improvement
+            if val_avg_loss < best_val_loss:
+                best_val_loss = val_avg_loss
+                patience_counter = 0
+                # Save best model
+                best_path = ckpt_dir / "best_model.pt"
+                torch.save(model_to_save.state_dict(), best_path)
+                print(f"  ║ ✓ Val loss improved! Saved best → {best_path}")
+            else:
+                patience_counter += 1
+                print(f"  ║ ✗ No improvement ({patience_counter}/{patience})")
+                if patience_counter >= patience:
+                    print(f"  ║ ⚠ Early stopping triggered!")
+                    print(f"  ╚════════════════════════════════════════════╝\n")
+                    break
+            
             print(f"  ╚════════════════════════════════════════════╝\n")
 
     # -----------------------------------------------------------
-    # Save checkpoint (rank 0 only)
+    # Save final checkpoint + config + loss plot + close TensorBoard
     # -----------------------------------------------------------
     if is_main:
-        print("\n[SAVE] Saving model checkpoints...")
+        print("\n[SAVE] Saving final model config + loss plot...")
         save_start = time.time()
-        
-        # Create checkpoint directory
-        ckpt_dir = Path(f"bulkformer_checkpoints")
-        ckpt_dir.mkdir(exist_ok=True)
         
         # Get the underlying model (unwrap DDP)
         model_to_save = model.module if isinstance(model, DDP) else model
         
-        # 1. PyTorch native format (.pt)
-        pt_path = ckpt_dir / f"epoch_{epoch}.pt"
-        torch.save(model_to_save.state_dict(), pt_path)
-        print(f"  ✓ PyTorch format: {pt_path}")
-        
-        # 2. Hugging Face SafeTensors format (.safetensors) - recommended for HF Hub
-        if HAS_SAFETENSORS:
-            # Convert state_dict to CPU tensors for safetensors
-            state_dict_cpu = {k: v.cpu() for k, v in model_to_save.state_dict().items()}
-            safetensors_path = ckpt_dir / f"epoch_{epoch}.safetensors"
-            save_safetensors(state_dict_cpu, str(safetensors_path))
-            print(f"  ✓ SafeTensors format (HF-compatible): {safetensors_path}")
-        
-        # 3. Model config JSON for HF Hub
+        # Model config JSON
         config = {
             "model_type": "bulkformer",
             "num_genes": num_genes,
@@ -308,26 +343,69 @@ def main():
             "bin_head": model_params.get("bin_head", 2),
             "full_head": model_params.get("full_head", 2),
             "p_repeat": model_params.get("p_repeat", 1),
-            "training_epoch": epoch,
-            "final_loss": epoch_avg_loss
+            "final_epoch": epoch,
+            "best_val_loss": best_val_loss,
+            "early_stopped": patience_counter >= patience
         }
         config_path = ckpt_dir / "config.json"
         with open(config_path, "w") as f:
             json.dump(config, f, indent=2)
         print(f"  ✓ Config: {config_path}")
         
+        # Save loss history as CSV
+        loss_df = pd.DataFrame({
+            "epoch": range(len(train_losses)),
+            "train_loss": train_losses,
+            "val_loss": val_losses
+        })
+        loss_csv = ckpt_dir / "loss_history.csv"
+        loss_df.to_csv(loss_csv, index=False)
+        print(f"  ✓ Loss history: {loss_csv}")
+        
+        # Plot loss curves
+        if HAS_MATPLOTLIB:
+            plt.figure(figsize=(10, 6))
+            plt.plot(train_losses, marker='o', label='Train Loss', linewidth=2)
+            plt.plot(val_losses, marker='s', label='Val Loss', linewidth=2)
+            plt.xlabel("Epoch", fontsize=12)
+            plt.ylabel("Loss", fontsize=12)
+            plt.title("BulkFormer Training Progress", fontsize=14, fontweight='bold')
+            plt.legend(fontsize=11)
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            
+            plot_path = ckpt_dir / "loss_plot.png"
+            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"  ✓ Loss plot: {plot_path}")
+        else:
+            print(f"  ⚠ matplotlib not installed; skipping plot")
+        
+        # Optional: SafeTensors for best model
+        if HAS_SAFETENSORS:
+            best_path = ckpt_dir / "best_model.pt"
+            if best_path.exists():
+                state_dict = torch.load(best_path, map_location="cpu")
+                state_dict_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v 
+                                 for k, v in state_dict.items()}
+                safetensors_path = ckpt_dir / "best_model.safetensors"
+                save_safetensors(state_dict_cpu, str(safetensors_path))
+                print(f"  ✓ SafeTensors: {safetensors_path}")
+        
         save_time = time.time() - save_start
-        print(f"\n  ✓ All checkpoints saved in {ckpt_dir}/, Time: {save_time:.2f}s")
+        print(f"\n  ✓ Checkpoints in {ckpt_dir}/, Time: {save_time:.2f}s")
         print(f"\n  📦 To upload to Hugging Face Hub:")
         print(f"     huggingface-cli upload <username>/<repo-name> bulkformer_checkpoints/")
         
-        # -----------------------------------------------------------
         # Summary
-        # -----------------------------------------------------------
         total_time = time.time() - script_start
         print("\n" + "="*70)
         print(f"Training completed!")
         print(f"  Total script time: {total_time:.2f}s ({total_time/60:.1f}m)")
+        print(f"  Best val loss: {best_val_loss:.6f}")
+        # if HAS_TENSORBOARD:
+        #     print(f"\n  🔍 View training curves:")
+        #     print(f"     tensorboard --logdir=runs")
         print("="*70 + "\n")
     
     # Cleanup
