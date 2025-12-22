@@ -382,15 +382,15 @@ def main():
             print(f"  ⚠ matplotlib not installed; skipping plot")
         
         # Optional: SafeTensors for best model
-        if HAS_SAFETENSORS:
-            best_path = ckpt_dir / "best_model.pt"
-            if best_path.exists():
-                state_dict = torch.load(best_path, map_location="cpu")
-                state_dict_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v 
-                                 for k, v in state_dict.items()}
-                safetensors_path = ckpt_dir / "best_model.safetensors"
-                save_safetensors(state_dict_cpu, str(safetensors_path))
-                print(f"  ✓ SafeTensors: {safetensors_path}")
+        # if HAS_SAFETENSORS:
+        #     best_path = ckpt_dir / "best_model.pt"
+        #     if best_path.exists():
+        #         state_dict = torch.load(best_path, map_location="cpu")
+        #         state_dict_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v 
+        #                          for k, v in state_dict.items()}
+        #         safetensors_path = ckpt_dir / "best_model.safetensors"
+        #         save_safetensors(state_dict_cpu, str(safetensors_path))
+        #         print(f"  ✓ SafeTensors: {safetensors_path}")
         
         save_time = time.time() - save_start
         print(f"\n  ✓ Checkpoints in {ckpt_dir}/, Time: {save_time:.2f}s")
